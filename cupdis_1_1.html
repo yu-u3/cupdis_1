@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>カップディスペンサー制御</title>
+</head>
+<body>
+    <h1>カップディスペンサー制御テスト</h1>
+    <button id="connectButton">シリアルポートに接続</button>
+    <button id="dispenseButton" disabled>カップを排出</button>
+    <pre id="log"></pre>
+
+    <script>
+        let port;
+        let reader;
+        let writer;
+        const BAUDRATE = 115200; // Baudrate for serial communication
+
+        const connectButton = document.getElementById('connectButton');
+        const dispenseButton = document.getElementById('dispenseButton');
+        const logElement = document.getElementById('log');
+
+        function log(message) {
+            logElement.textContent += message + '\n';
+            logElement.scrollTop = logElement.scrollHeight; // スクロールを一番下へ
+        }
+
+        // Pythonのcalc_checksum_codeに相当するJavaScript関数
+        function calcChecksumCode(dataBytes) {
+            return dataBytes.reduce((sum, byte) => sum + byte, 0) & 0xFF; // Calculates the checksum as the lower 8 bits of the sum of bytes.
+        }
+
+        // Pythonのencodeに相当するJavaScript関数
+        function encodeCommand(commandCode, instructionCode, data = []) {
+            // Length Code is the total number of bytes: Command Code (1) + Length Code (1) + Instruction Code (1) + Data (len(data)) + Checksum Code (1) + End Code (1).
+            const lengthCode = 1 + 1 + 1 + data.length + 1 + 1;
+            
+            // Part for checksum calculation (Command Code + Length Code + Instruction Code + Data)
+            const packetWithoutChecksumAndEnd = [commandCode, lengthCode, instructionCode].concat(data);
+            
+            const checksumCode = calcChecksumCode(packetWithoutChecksumAndEnd); // Checksum is the lower 8 bits of the sum of all data excluding "Checksum Code" and "End Code".
+            
+            const packet = new Uint8Array(packetWithoutChecksumAndEnd.concat([checksumCode, 0xFF])); // End Code is fixed at 0xFF.
+            return packet;
+        }
+
+        // Pythonのcmd_dispense_beverageに相当するJavaScript関数
+        function cmdDispenseBeverage(beverageNumber, data1) {
+            // Command Code: 0x04 (Dispense Beverage)
+            // Instruction Code: 0xAA (Setting)
+            // Data: [Beverage Number, Data 1]
+            return encodeCommand(0x04, 0xAA, [beverageNumber, data1]);
+        }
+
+        connectButton.addEventListener('click', async () => {
+            try {
+                // シリアルポートを選択して開く
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: BAUDRATE }); // Open the serial port with the specified baud rate.
+
+                log('シリアルポートに接続しました。');
+                dispenseButton.disabled = false;
+
+                // データの読み取りを開始
+                reader = port.readable.getReader();
+                readLoop();
+
+            } catch (error) {
+                log(`接続エラー: ${error.message}`);
+            }
+        });
+
+        dispenseButton.addEventListener('click', async () => {
+            if (!port) {
+                log('まずシリアルポートに接続してください。');
+                return;
+            }
+
+            try {
+                // カップを1つ排出するコマンドを構築
+                // Beverage Number: 1 (Drop one cup)
+                // Data 1: 0x00 (Reserved)
+                const command = cmdDispenseBeverage(0x01, 0x00); 
+                log(`[送信] ${Array.from(command).map(b => b.toString(16).padStart(2, '0')).join('')}`);
+
+                // データを書き込む
+                writer = port.writable.getWriter();
+                await writer.write(command);
+                writer.releaseLock();
+                log('コマンドを送信しました。');
+
+            } catch (error) {
+                log(`送信エラー: ${error.message}`);
+            }
+        });
+
+        async function readLoop() {
+            // 応答のExpected Lengthは7バイト。
+            const expectedResponseLength = 7; 
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) {
+                    // リーダーがロック解除されたか、ポートが閉じられた
+                    log('シリアルポートの読み取りが終了しました。');
+                    break;
+                }
+                if (value) {
+                    const response = Array.from(value);
+                    log(`[受信] ${response.map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}`);
+
+                    // 応答の解析 (Pythonのrequest関数と似たロジック)
+                    if (response && response.length >= 2 && response[response.length - 1] === 0xFF) { // Check for End Code 0xFF.
+                        const receivedLengthCode = response[1];
+                        if (response.length === receivedLengthCode) {
+                            if (response.length >= 5) { // Data 1 is at the 5th byte (index 4) of the response.
+                                const responseData1 = response[4];
+                                if (responseData1 === 0x01) {
+                                    log("カップ排出コマンド: 成功");
+                                } else if (responseData1 === 0x00) {
+                                    log("カップ排出コマンド: 失敗");
+                                } else {
+                                    log(`カップ排出コマンド: 不明な応答データ1 (${hex(responseData1)})`);
+                                }
+                            } else {
+                                log("カップ排出コマンド: 応答が不正、または短すぎます。");
+                            }
+                        } else {
+                            log(`警告: 受信したバイト数 (${response.length}) が Length Code (${receivedLengthCode}) と一致しません。`);
+                        }
+                    } else {
+                        log("警告: 応答が不完全であるか、終端コードが見つかりません。");
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>
