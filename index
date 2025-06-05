@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>シリアルポート通信</title>
+</head>
+<body>
+    <h1>シリアルポート通信テスト</h1>
+    <button id="connectButton">シリアルポートに接続</button>
+    <button id="sendButton" disabled>コマンド送信 (スレーブステータス照会)</button>
+    <pre id="log"></pre>
+
+    <script>
+        let port;
+        let reader;
+        let writer;
+
+        const connectButton = document.getElementById('connectButton');
+        const sendButton = document.getElementById('sendButton');
+        const logElement = document.getElementById('log');
+
+        function log(message) {
+            logElement.textContent += message + '\n';
+            logElement.scrollTop = logElement.scrollHeight; // スクロールを一番下へ
+        }
+
+        // Pythonのcalc_checksum_codeに相当するJavaScript関数
+        function calcChecksumCode(dataBytes) {
+            return dataBytes.reduce((sum, byte) => sum + byte, 0) & 0xFF;
+        }
+
+        // Pythonのencodeに相当するJavaScript関数
+        function encodeCommand(commandCode, instructionCode, data = []) {
+            // Command + Length + Instruction + Data + Checksum + End
+            const lengthCode = 3 + data.length + 2;
+            const packetWithoutChecksum = [commandCode, lengthCode, instructionCode].concat(data);
+            const checksumCode = calcChecksumCode(packetWithoutChecksum);
+            const packet = new Uint8Array(packetWithoutChecksum.concat([checksumCode, 0xFF]));
+            return packet;
+        }
+
+        // Pythonのcmd_slave_status_queryに相当するJavaScript関数
+        function cmdSlaveStatusQuery() {
+            // コマンドコード=0x01, インストラクションコード=0x55, データなし
+            return encodeCommand(0x01, 0x55, []);
+        }
+
+
+        connectButton.addEventListener('click', async () => {
+            try {
+                // シリアルポートを選択して開く
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+
+                log('シリアルポートに接続しました。');
+                sendButton.disabled = false;
+
+                // データの読み取りを開始
+                reader = port.readable.getReader();
+                readLoop();
+
+            } catch (error) {
+                log(`接続エラー: ${error.message}`);
+            }
+        });
+
+        sendButton.addEventListener('click', async () => {
+            if (!port) {
+                log('まずシリアルポートに接続してください。');
+                return;
+            }
+
+            try {
+                // コマンドのエンコード
+                const command = cmdSlaveStatusQuery();
+                log(`[送信] ${Array.from(command).map(b => b.toString(16).padStart(2, '0')).join('')}`);
+
+                // データを書き込む
+                writer = port.writable.getWriter();
+                await writer.write(command);
+                writer.releaseLock();
+                log('コマンドを送信しました。');
+
+            } catch (error) {
+                log(`送信エラー: ${error.message}`);
+            }
+        });
+
+        async function readLoop() {
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) {
+                    // リーダーがロック解除されたか、ポートが閉じられた
+                    log('シリアルポートの読み取りが終了しました。');
+                    break;
+                }
+                if (value) {
+                    log(`[受信] ${Array.from(value).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}`);
+                    // ここで受信したデータをパースするロジックを追加できます
+                    // Pythonのrequest関数のように終端コード0xFFを待つ処理も必要に応じて実装
+                }
+            }
+        }
+    </script>
+</body>
+</html>
